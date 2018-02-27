@@ -7825,6 +7825,16 @@ simple:
 
 	p = task_of(se);
 
+done: __maybe_unused;
+#ifdef CONFIG_SMP
+	/*
+	 * Move the next running task to the front of
+	 * the list, so our cfs_tasks list becomes MRU
+	 * one.
+	 */
+	list_move(&p->se.group_node, &rq->cfs_tasks);
+#endif
+
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
 
