@@ -20,6 +20,7 @@
 #include <linux/irqreturn.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/gpio.h>
+#include <linux/pm_qos.h>
 
 #include "mdss_panel.h"
 #include "mdss_dsi_cmd.h"
@@ -611,6 +612,7 @@ struct mdss_dsi_ctrl_pdata {
 	wait_queue_head_t wake_waitq;
 	atomic_t disp_is_on;
 	atomic_t needs_wake;
+	struct pm_qos_request pm_qos_req;
 };
 
 struct dsi_status_data {
