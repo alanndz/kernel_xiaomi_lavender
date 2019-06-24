@@ -504,8 +504,21 @@ static void msm_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 	unsigned i;
 
 	for (i = 0; i < chip->ngpio; i++, gpio++) {
+/*Add-begin-HMI_M6100_A01-8
+**Author:lijiang@longcheer.com
+**Date:2018-8-11
+**Comment:remove tz gpio
+*/
+#ifdef CONFIG_KERNEL_CUSTOM_F7A
+		if (i != 8 && i!= 9 && i!= 10 && i!= 11 && i!= 20 && i!= 72) {
+			msm_gpio_dbg_show_one(s, NULL, chip, i, gpio);
+			seq_puts(s, "\n");
+		}
+#else
 		msm_gpio_dbg_show_one(s, NULL, chip, i, gpio);
 		seq_puts(s, "\n");
+#endif
+/*Add-end-HMI_M6100_A01-8*/
 	}
 }
 
