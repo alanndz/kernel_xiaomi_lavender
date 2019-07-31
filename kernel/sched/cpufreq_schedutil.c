@@ -150,11 +150,17 @@ static void sugov_update_commit(struct sugov_policy *sg_policy, u64 time,
 
 		policy->cur = next_freq;
 		trace_cpu_frequency(next_freq, smp_processor_id());
-	} else {
+	} else if (!sg_policy->work_in_progress) {
 		sg_policy->work_in_progress = true;
 		irq_work_queue(&sg_policy->irq_work);
 	}
 }
+#else
+static inline bool sugov_cpu_is_busy(struct sugov_cpu *sg_cpu) { return false; }
+static void sugov_cpu_is_busy_update(struct sugov_cpu *sg_cpu
+				     unsigned long util)
+{}
+#endif /* CONFIG_NO_HZ_COMMON */
 
 /**
  * get_next_freq - Compute a new frequency for a given cpufreq policy.
