@@ -2184,9 +2184,6 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 				__func__, buf_index);
 				spin_unlock_irqrestore(&port->dsp_lock,
 								dsp_flags);
-				spin_unlock_irqrestore(
-					&(session[session_id].session_lock),
-					flags);
 				return -EINVAL;
 			}
 			if (data->payload_size >= 2 * sizeof(uint32_t) &&
@@ -2304,9 +2301,6 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 				__func__, buf_index);
 				spin_unlock_irqrestore(&port->dsp_lock,
 								dsp_flags);
-				spin_unlock_irqrestore(
-					&(session[session_id].session_lock),
-					flags);
 				return -EINVAL;
 			}
 			port->buf[buf_index].used = 0;
