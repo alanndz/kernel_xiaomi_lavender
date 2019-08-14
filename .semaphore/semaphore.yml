@@ -16,7 +16,7 @@ blocks:
         commands:
           - checkout
           - sudo apt-get update
-          - install-package --update-new ccache bc bash git-core gnupg build-essential zip curl make automake autogen autoconf autotools-dev libtool shtool python m4 gcc libtool zlib1g-dev dash pigz gcc-aarch64-linux-gnu flex libssl-dev
+          - install-package --update-new bc gcc-aarch64-linux-gnu flex libssl-dev
           - git clone --depth=1 https://github.com/alanndz/my_scripts .build
           - export TARGET_ROM="miui"
           - bash .build/kernel_lavender_ci_q.sh
