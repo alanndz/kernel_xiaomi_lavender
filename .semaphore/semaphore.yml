@@ -18,6 +18,6 @@ blocks:
           - sudo apt-get update
           - install-package --update-new bc gcc-aarch64-linux-gnu flex libssl-dev
           - git clone --depth=1 https://github.com/alanndz/my_scripts .build
-          - export TARGET_ROM="miui"
+          - export CODENAME="AOSP-Drifter-Pie"
           - bash .build/kernel_lavender_ci_q.sh
 
