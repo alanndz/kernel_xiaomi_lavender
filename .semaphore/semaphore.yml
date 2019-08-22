@@ -1,0 +1,24 @@
+version: v1.0
+name: Building Kernel For Lavender
+agent:
+  machine:
+    type: e1-standard-8
+    os_image: ubuntu1804
+ 
+blocks:
+  - name: "Build"
+    task:
+      env_vars:
+        - name: APP_ENV
+          value: prod
+      jobs:
+      - name: Kernel Build
+        commands:
+          - checkout
+          - sudo apt-get update
+          - install-package --update-new bc gcc-aarch64-linux-gnu flex libssl-dev
+          - git clone --depth=1 https://github.com/alanndz/my_scripts .build
+          - export CODENAME="AOSP-Void-Pie"
+          - export USECLANG=1
+          - bash .build/kernel_lavender_ci_q.sh
+
