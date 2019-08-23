@@ -18,6 +18,8 @@ blocks:
           - sudo apt-get update
           - install-package --update-new bc gcc-aarch64-linux-gnu flex libssl-dev
           - git clone --depth=1 https://github.com/alanndz/my_scripts .build
+          - export RELEASE_STATUS=1
+          - export KERNEL_VERSION="v1.00"
           - export CODENAME="AOSP-Drifter-Pie"
           - export TYPE_KERNEL="HMP"
           - export USECLANG=1
