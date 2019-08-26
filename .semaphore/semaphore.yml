@@ -19,6 +19,7 @@ blocks:
           - install-package --update-new bc gcc-aarch64-linux-gnu flex libssl-dev
           - git clone --depth=1 https://github.com/alanndz/my_scripts .build
           - export CODENAME="AOSP-Void-Pie"
+          - export TYPE_KERNEL="EAS"
           - export USECLANG=1
           - bash .build/kernel_lavender_ci_q.sh
 
