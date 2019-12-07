@@ -280,7 +280,7 @@
 		mas_oxili: mas-oxili {
 			cell-id = <MSM_BUS_MASTER_GRAPHICS_3D>;
 			label = "mas-oxili";
-			qcom,buswidth = <4>;
+			qcom,buswidth = <32>;
 			qcom,agg-ports = <2>;
 			qcom,ap-owned;
 			qcom,qport = <1>;
@@ -308,7 +308,7 @@
 		mas_snoc_bimc: mas-snoc-bimc {
 			cell-id = <MSM_BUS_SNOC_BIMC_MAS>;
 			label = "mas-snoc-bimc";
-			qcom,buswidth = <4>;
+			qcom,buswidth = <32>;
 			qcom,agg-ports = <2>;
 			qcom,connections = <&slv_hmss_l3 &slv_ebi>;
 			qcom,bus-dev = <&fab_bimc>;
