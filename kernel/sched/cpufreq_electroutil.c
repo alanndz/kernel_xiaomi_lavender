@@ -20,6 +20,7 @@
 #include <linux/state_notifier.h>
 #include "sched.h"
 #include "tune.h"
+#include "linux/energy_model.h"
 
 unsigned long boosted_cpu_util(int cpu);
 
@@ -68,6 +69,9 @@ struct eugov_policy {
 	bool work_in_progress;
 
 	bool need_freq_update;
+#ifdef CONFIG_ENERGY_MODEL
+	struct em_perf_domain *pd;
+#endif
 };
 
 struct eugov_cpu {
@@ -78,6 +82,7 @@ struct eugov_cpu {
 	unsigned int iowait_boost;
 	unsigned int iowait_boost_max;
 	u64 last_update;
+	unsigned int cpu;
 
 	/* The fields below are only needed when sharing a policy. */
 	unsigned long util;
@@ -87,6 +92,7 @@ struct eugov_cpu {
 	/* The field below is for single-CPU policies only. */
 #ifdef CONFIG_NO_HZ_COMMON
 	unsigned long saved_idle_calls;
+	unsigned long previous_util;
 #endif
 };
 
@@ -94,6 +100,38 @@ static DEFINE_PER_CPU(struct eugov_cpu, eugov_cpu);
 static DEFINE_PER_CPU(struct eugov_tunables *, cached_tunables);
 
 /************************ Governor internals ***********************/
+
+#ifdef CONFIG_ENERGY_MODEL
+static void eugov_policy_attach_pd(struct eugov_policy *eg_policy)
+{
+	struct em_perf_domain *pd;
+	struct cpufreq_policy *policy = eg_policy->policy;
+
+ 	eg_policy->pd = NULL;
+	pd = em_cpu_get(policy->cpu);
+	if (!pd)
+		return;
+
+ 	if (cpumask_equal(policy->related_cpus, to_cpumask(pd->cpus)))
+		eg_policy->pd = pd;
+	else
+		pr_warn("%s: Not all CPUs in schedutil policy %u share the same perf domain, no perf domain for that policy will be registered\n",
+			__func__, policy->cpu);
+}
+
+ static struct em_perf_domain *eugov_policy_get_pd(
+						struct eugov_policy *eg_policy)
+{
+	return eg_policy->pd;
+}
+#else /* CONFIG_ENERGY_MODEL */
+static void eugov_policy_attach_pd(struct eugov_policy *eg_policy) {}
+static struct em_perf_domain *eugov_policy_get_pd(
+						struct eugov_policy *eg_policy)
+{
+	return NULL;
+}
+#endif /* CONFIG_ENERGY_MODEL */
 
 static bool eugov_should_update_freq(struct eugov_policy *eg_policy, u64 time)
 {
@@ -117,6 +155,46 @@ static bool eugov_should_update_freq(struct eugov_policy *eg_policy, u64 time)
 	/* No need to recalculate next freq for min_rate_limit_us at least */
 	return delta_ns >= eg_policy->min_rate_limit_ns;
 }
+
+#ifdef CONFIG_NO_HZ_COMMON
+static bool eugov_cpu_is_busy(struct eugov_cpu *eg_cpu)
+{
+	unsigned long idle_calls = tick_nohz_get_idle_calls();
+	bool ret = idle_calls == eg_cpu->saved_idle_calls;
+
+ 	eg_cpu->saved_idle_calls = idle_calls;
+	return ret;
+}
+static void eugov_cpu_is_busy_update(struct eugov_cpu *eg_cpu,
+				     unsigned long util)
+{
+	unsigned long idle_calls = tick_nohz_get_idle_calls_cpu(eg_cpu->cpu);
+ 	eg_cpu->saved_idle_calls = idle_calls;
+
+ 	/*
+	 * Make sure that this CPU will not be immediately considered as busy in
+	 * cases where the CPU has already entered an idle state. In that case,
+	 * the number of idle_calls will not vary anymore until it exits idle,
+	 * which would lead eugov_cpu_is_busy() to say that this CPU is busy,
+	 * because it has not (re)entered idle since the last time we looked at
+	 * it.
+	 * Assuming cpu0 and cpu1 are in the same policy, that will make sure
+	 * this sequence of events leads to right cpu1 business status from
+	 * get_next_freq(cpu=1)
+	 * cpu0: [enter idle] -> [get_next_freq] -> [doing nothing] -> [wakeup]
+	 * cpu1:                ...              -> [get_next_freq] ->   ...
+	 */
+	if (util <= eg_cpu->previous_util)
+		eg_cpu->saved_idle_calls--;
+
+ 	eg_cpu->previous_util = util;
+}
+#else
+static inline bool eugov_cpu_is_busy(struct eugov_cpu *eg_cpu) { return false; }
+static void eugov_cpu_is_busy_update(struct eugov_cpu *eg_cpu
+				     unsigned long util)
+{}
+#endif /* CONFIG_NO_HZ_COMMON */
 
 static bool eugov_up_down_rate_limit(struct eugov_policy *eg_policy, u64 time,
 				     unsigned int next_freq)
@@ -168,6 +246,8 @@ static void eugov_update_commit(struct eugov_policy *eg_policy, u64 time,
  * @eg_policy: electroutil policy object to compute the new frequency for.
  * @util: Current CPU utilization.
  * @max: CPU capacity.
+ * @busy: true if at least one CPU in the policy is busy, which means it had no
+ *	idle time since its last frequency change.
  *
  * When the device is awake, the following is true:
  * If the utilization is frequency-invariant, choose the new frequency to be
@@ -181,6 +261,9 @@ static void eugov_update_commit(struct eugov_policy *eg_policy, u64 time,
  * next_freq = C * curr_freq * util_raw / max
  *
  * Take C = 1.25 for the frequency tipping point at (util / max) = 0.8.
+ * An energy-aware boost is then applied if busy is true. The boost will allow
+ * selecting frequencies at most twice as costly in term of energy.
+ *
  *
  * When the device is suspended, the following is true:
  * CPU Capacity is increased such that
@@ -201,7 +284,8 @@ static void eugov_update_commit(struct eugov_policy *eg_policy, u64 time,
  * cpufreq driver limitations.
  */
 static unsigned int get_next_freq(struct eugov_policy *eg_policy,
-				  unsigned long util, unsigned long max)
+				  unsigned long util, unsigned long max,
+				  bool busy)
 {
 	struct cpufreq_policy *policy = eg_policy->policy;
 	unsigned int freq = arch_scale_freq_invariant() ?
@@ -215,18 +299,36 @@ static unsigned int get_next_freq(struct eugov_policy *eg_policy,
 		max = max * (capacity_factor + 1) / capacity_factor;
 	}
 
+	struct em_perf_domain *pd = eugov_policy_get_pd(eg_policy);
+
+ 	/*
+	 * Maximum power we are ready to spend.
+	 * When one CPU is busy in the policy, we apply a boost to help it reach
+	 * the needed frequency faster.
+	 */
+	unsigned int cost_margin = busy ? 1024/2 : 0;
+
+
+ 	/*
+	 * Try to get a higher frequency if one is available, given the extra
+	 * power we are ready to spend.
+	 */
+	/* freq = em_pd_get_higher_freq(pd, freq, cost_margin); */
+
 	switch(policy->cpu){
 	case 0:
 	case 1:
 	case 2:
 	case 3:
-		freq = (freq + (freq >> 2)) * util / max;
+		/* freq = (freq + (freq >> 2)) * util / max; */
+	 	freq = map_util_freq(util, freq, max);
 		if(state_suspended &&  silver_max_freq > 0 && silver_max_freq < freq)
 			return silver_max_freq;
 		break;
 	case 4:
 	case 5:
-		freq = (freq + (freq >> 2)) * util / max;
+		/* freq = (freq + (freq >> 2)) * util / max; */
+	 	freq = map_util_freq(util, freq, max);
 		if(state_suspended && gold_max_freq > 0 && gold_max_freq < freq)
 			return gold_max_freq;
 		break;
@@ -240,6 +342,8 @@ static unsigned int get_next_freq(struct eugov_policy *eg_policy,
 	default:
 		BUG();
 	}
+
+	freq = em_pd_get_higher_freq(pd, freq, cost_margin);
 
 	if (freq == eg_policy->cached_raw_freq && eg_policy->next_freq != UINT_MAX)
 		return eg_policy->next_freq;
@@ -339,19 +443,6 @@ static void eugov_iowait_boost(struct eugov_cpu *eg_cpu, unsigned long *util,
 	}
 }
 
-#ifdef CONFIG_NO_HZ_COMMON
-static bool eugov_cpu_is_busy(struct eugov_cpu *eg_cpu)
-{
-	unsigned long idle_calls = tick_nohz_get_idle_calls();
-	bool ret = idle_calls == eg_cpu->saved_idle_calls;
-
-	eg_cpu->saved_idle_calls = idle_calls;
-	return ret;
-}
-#else
-static inline bool eugov_cpu_is_busy(struct eugov_cpu *eg_cpu) { return false; }
-#endif /* CONFIG_NO_HZ_COMMON */
-
 static void eugov_update_single(struct update_util_data *hook, u64 time,
 				unsigned int flags)
 {
@@ -369,13 +460,14 @@ static void eugov_update_single(struct update_util_data *hook, u64 time,
 		return;
 
 	busy = eugov_cpu_is_busy(eg_cpu);
+	eugov_cpu_is_busy_update(eg_cpu, util);
 
 	if (flags & SCHED_CPUFREQ_DL) {
 		next_f = policy->cpuinfo.max_freq;
 	} else {
 		eugov_get_util(&util, &max, time);
 		eugov_iowait_boost(eg_cpu, &util, &max);
-		next_f = get_next_freq(eg_policy, util, max);
+		next_f = get_next_freq(eg_policy, util, max, busy);
 		/*
 		 * Do not reduce the frequency if the CPU has not been idle
 		 * recently, as the reduction is likely to be premature then.
@@ -392,6 +484,8 @@ static unsigned int eugov_next_freq_shared(struct eugov_cpu *eg_cpu, u64 time)
 	struct cpufreq_policy *policy = eg_policy->policy;
 	unsigned long util = 0, max = 1;
 	unsigned int j;
+	unsigned long eg_cpu_util = 0;
+	bool busy = false;
 
 	for_each_cpu(j, policy->cpus) {
 		struct eugov_cpu *j_eg_cpu = &per_cpu(eugov_cpu, j);
@@ -415,7 +509,10 @@ static unsigned int eugov_next_freq_shared(struct eugov_cpu *eg_cpu, u64 time)
 			return policy->cpuinfo.max_freq;
 
 		j_util = j_eg_cpu->util;
+		if (j_eg_cpu == eg_cpu)
+			eg_cpu_util = j_util;
 		j_max = j_eg_cpu->max;
+		busy |= eugov_cpu_is_busy(j_eg_cpu);
 		if (j_util * max > j_max * util) {
 			util = j_util;
 			max = j_max;
@@ -424,7 +521,15 @@ static unsigned int eugov_next_freq_shared(struct eugov_cpu *eg_cpu, u64 time)
 		eugov_iowait_boost(j_eg_cpu, &util, &max);
 	}
 
-	return get_next_freq(eg_policy, util, max);
+	/*
+	 * Only update the business status if we are looking at the CPU for
+	 * which a utilization change triggered a call to get_next_freq(). This
+	 * way, we don't affect the "busy" status of CPUs that don't have any
+	 * change in utilization.
+	 */
+	eugov_cpu_is_busy_update(eg_cpu, eg_cpu_util);
+
+ 	return get_next_freq(eg_policy, util, max, busy);
 }
 
 static void eugov_update_shared(struct update_util_data *hook, u64 time,
@@ -966,6 +1071,9 @@ static int eugov_start(struct cpufreq_policy *policy)
 							eugov_update_shared :
 							eugov_update_single);
 	}
+
+	eugov_policy_attach_pd(eg_policy);
+
 	return 0;
 }
 
