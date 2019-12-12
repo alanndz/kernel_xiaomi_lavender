@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+if [ ! ${1} ]; then
+    echo "Please input link patch too"
+    exit
+fi
+
+curl ${1}.patch | git am
