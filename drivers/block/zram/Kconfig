@@ -42,3 +42,6 @@ config ZRAM_DEFAULT_COMP_ALGORITHM
 
 config ZRAM_HIDE_LZO
 	bool "Hide LZO compression algorithm in available compression list"
+
+config ZRAM_HIDE_DEFLATE
+        bool "Hide DEFLATE compression algorithm in available compression list"
