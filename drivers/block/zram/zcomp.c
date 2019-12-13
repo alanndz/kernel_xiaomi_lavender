@@ -25,8 +25,10 @@ static const char * const backends[] = {
 #if IS_ENABLED(CONFIG_CRYPTO_LZ4)
 	"lz4",
 #endif
+#ifndef CONFIG_ZRAM_HIDE_DEFLATE
 #if IS_ENABLED(CONFIG_CRYPTO_DEFLATE)
 	"deflate",
+#endif
 #endif
 #if IS_ENABLED(CONFIG_CRYPTO_LZ4HC)
 	"lz4hc",
