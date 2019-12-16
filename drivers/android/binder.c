@@ -76,7 +76,7 @@
 #include "binder_trace.h"
 
 static HLIST_HEAD(binder_deferred_list);
-static DEFINE_SPINLOCK(binder_deferred_lock);
+static DEFINE_MUTEX(binder_deferred_lock);
 
 static HLIST_HEAD(binder_devices);
 static HLIST_HEAD(binder_procs);
@@ -110,6 +110,10 @@ BINDER_DEBUG_ENTRY(proc);
 /* This is only defined in include/asm-arm/sizes.h */
 #ifndef SZ_1K
 #define SZ_1K                               0x400
+#endif
+
+#ifndef SZ_4M
+#define SZ_4M                               0x400000
 #endif
 
 #define FORBIDDEN_MMAP_FLAGS                (VM_WRITE)
@@ -235,14 +239,6 @@ struct binder_transaction_log {
 };
 static struct binder_transaction_log binder_transaction_log;
 static struct binder_transaction_log binder_transaction_log_failed;
-
-static struct kmem_cache *binder_node_pool;
-static struct kmem_cache *binder_proc_pool;
-static struct kmem_cache *binder_ref_death_pool;
-static struct kmem_cache *binder_ref_pool;
-static struct kmem_cache *binder_thread_pool;
-static struct kmem_cache *binder_transaction_pool;
-static struct kmem_cache *binder_work_pool;
 
 static struct binder_transaction_log_entry *binder_transaction_log_add(
 	struct binder_transaction_log *log)
@@ -1383,9 +1379,9 @@ static struct binder_node *binder_init_node_ilocked(
 static struct binder_node *binder_new_node(struct binder_proc *proc,
 					   struct flat_binder_object *fp)
 {
-	struct binder_node *node, *new_node;
+	struct binder_node *node;
+	struct binder_node *new_node = kzalloc(sizeof(*node), GFP_KERNEL);
 
-	new_node = kmem_cache_zalloc(binder_node_pool, GFP_KERNEL);
 	if (!new_node)
 		return NULL;
 	binder_inner_proc_lock(proc);
@@ -1395,14 +1391,14 @@ static struct binder_node *binder_new_node(struct binder_proc *proc,
 		/*
 		 * The node was already added by another thread
 		 */
-		kmem_cache_free(binder_node_pool, new_node);
+		kfree(new_node);
 
 	return node;
 }
 
 static void binder_free_node(struct binder_node *node)
 {
-	kmem_cache_free(binder_node_pool, node);
+	kfree(node);
 	binder_stats_deleted(BINDER_STAT_NODE);
 }
 
@@ -1890,9 +1886,8 @@ static void binder_free_ref(struct binder_ref *ref)
 {
 	if (ref->node)
 		binder_free_node(ref->node);
-	if (ref->death)
-		kmem_cache_free(binder_ref_death_pool, ref->death);
-	kmem_cache_free(binder_ref_pool, ref);
+	kfree(ref->death);
+	kfree(ref);
 }
 
 /**
@@ -1985,7 +1980,7 @@ static int binder_inc_ref_for_node(struct binder_proc *proc,
 	ref = binder_get_ref_for_node_olocked(proc, node, NULL);
 	if (!ref) {
 		binder_proc_unlock(proc);
-		new_ref = kmem_cache_zalloc(binder_ref_pool, GFP_KERNEL);
+		new_ref = kzalloc(sizeof(*ref), GFP_KERNEL);
 		if (!new_ref)
 			return -ENOMEM;
 		binder_proc_lock(proc);
@@ -1999,7 +1994,7 @@ static int binder_inc_ref_for_node(struct binder_proc *proc,
 		 * Another thread created the ref first so
 		 * free the one we allocated
 		 */
-		kmem_cache_free(binder_ref_pool, new_ref);
+		kfree(new_ref);
 	return ret;
 }
 
@@ -2122,19 +2117,9 @@ static struct binder_thread *binder_get_txn_from_and_acq_inner(
 
 static void binder_free_transaction(struct binder_transaction *t)
 {
-	struct binder_proc *target_proc = t->to_proc;
-
-	if (target_proc) {
-		binder_inner_proc_lock(target_proc);
-		if (t->buffer)
-			t->buffer->transaction = NULL;
-		binder_inner_proc_unlock(target_proc);
-	}
-	/*
-	 * If the transaction has no target_proc, then
-	 * t->buffer->transaction has already been cleared.
-	 */
-        kmem_cache_free(binder_transaction_pool, t);
+	if (t->buffer)
+		t->buffer->transaction = NULL;
+	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 }
 
@@ -3018,7 +3003,7 @@ static void binder_transaction(struct binder_proc *proc,
 			else
 				return_error = BR_DEAD_REPLY;
 			mutex_unlock(&context->context_mgr_node_lock);
-			if (target_node && target_proc->pid == proc->pid) {
+			if (target_node && target_proc == proc) {
 				binder_user_error("%d:%d got transaction to context manager from process owning it\n",
 						  proc->pid, thread->pid);
 				return_error = BR_FAILED_REPLY;
@@ -3084,7 +3069,7 @@ static void binder_transaction(struct binder_proc *proc,
 	e->to_proc = target_proc->pid;
 
 	/* TODO: reuse incoming transaction for reply */
-	t = kmem_cache_zalloc(binder_transaction_pool, GFP_KERNEL);
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (t == NULL) {
 		return_error = BR_FAILED_REPLY;
 		return_error_param = -ENOMEM;
@@ -3094,7 +3079,7 @@ static void binder_transaction(struct binder_proc *proc,
 	binder_stats_created(BINDER_STAT_TRANSACTION);
 	spin_lock_init(&t->lock);
 
-	tcomplete = kmem_cache_zalloc(binder_work_pool, GFP_KERNEL);
+	tcomplete = kzalloc(sizeof(*tcomplete), GFP_KERNEL);
 	if (tcomplete == NULL) {
 		return_error = BR_FAILED_REPLY;
 		return_error_param = -ENOMEM;
@@ -3404,8 +3389,8 @@ static void binder_transaction(struct binder_proc *proc,
 		BUG_ON(t->buffer->async_transaction != 0);
 		binder_pop_transaction_ilocked(target_thread, in_reply_to);
 		binder_enqueue_thread_work_ilocked(target_thread, &t->work);
-		wake_up_interruptible(&target_thread->wait);
 		binder_inner_proc_unlock(target_proc);
+		wake_up_interruptible_sync(&target_thread->wait);
 		binder_restore_priority(current, in_reply_to->saved_priority);
 		binder_free_transaction(in_reply_to);
 	} else if (!(t->flags & TF_ONE_WAY)) {
@@ -3470,10 +3455,10 @@ err_bad_extra_size:
 	if (secctx)
 		security_release_secctx(secctx, secctx_sz);
 err_get_secctx_failed:
-	kmem_cache_free(binder_work_pool, tcomplete);
+	kfree(tcomplete);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 err_alloc_tcomplete_failed:
-	kmem_cache_free(binder_transaction_pool, t);
+	kfree(t);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 err_alloc_t_failed:
 err_bad_call_stack:
@@ -3715,12 +3700,10 @@ static int binder_thread_write(struct binder_proc *proc,
 				     buffer->debug_id,
 				     buffer->transaction ? "active" : "finished");
 
-			binder_inner_proc_lock(proc);
 			if (buffer->transaction) {
 				buffer->transaction->buffer = NULL;
 				buffer->transaction = NULL;
 			}
-			binder_inner_proc_unlock(proc);
 			if (buffer->async_transaction && buffer->target_node) {
 				struct binder_node *buf_node;
 				struct binder_work *w;
@@ -3825,7 +3808,7 @@ static int binder_thread_write(struct binder_proc *proc,
 				 * Allocate memory for death notification
 				 * before taking lock
 				 */
-				death = kmem_cache_zalloc(binder_ref_death_pool, GFP_KERNEL);
+				death = kzalloc(sizeof(*death), GFP_KERNEL);
 				if (death == NULL) {
 					WARN_ON(thread->return_error.cmd !=
 						BR_OK);
@@ -3850,8 +3833,7 @@ static int binder_thread_write(struct binder_proc *proc,
 					"BC_CLEAR_DEATH_NOTIFICATION",
 					target);
 				binder_proc_unlock(proc);
-				if (death)
-					kmem_cache_free(binder_ref_death_pool, death);
+				kfree(death);
 				break;
 			}
 
@@ -3872,7 +3854,7 @@ static int binder_thread_write(struct binder_proc *proc,
 						proc->pid, thread->pid);
 					binder_node_unlock(ref->node);
 					binder_proc_unlock(proc);
-					kmem_cache_free(binder_ref_death_pool, death);
+					kfree(death);
 					break;
 				}
 				binder_stats_created(BINDER_STAT_DEATH);
@@ -4180,9 +4162,9 @@ retry:
 			binder_debug(BINDER_DEBUG_TRANSACTION_COMPLETE,
 				     "%d:%d BR_TRANSACTION_COMPLETE\n",
 				     proc->pid, thread->pid);
-			kmem_cache_free(binder_work_pool, w);
+			kfree(w);
 			binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
- 		} break;
+		} break;
 		case BINDER_WORK_NODE: {
 			struct binder_node *node = container_of(w, struct binder_node, work);
 			int strong, weak;
@@ -4293,7 +4275,7 @@ retry:
 				      (u64)cookie);
 			if (w->type == BINDER_WORK_CLEAR_DEATH_NOTIFICATION) {
 				binder_inner_proc_unlock(proc);
-				kmem_cache_free(binder_ref_death_pool, death);
+				kfree(death);
 				binder_stats_deleted(BINDER_STAT_DEATH);
 			} else {
 				binder_enqueue_work_ilocked(
@@ -4465,7 +4447,7 @@ static void binder_release_work(struct binder_proc *proc,
 		case BINDER_WORK_TRANSACTION_COMPLETE: {
 			binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
 				"undelivered TRANSACTION_COMPLETE\n");
-			kmem_cache_free(binder_work_pool, w);
+			kfree(w);
 			binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 		} break;
 		case BINDER_WORK_DEAD_BINDER_AND_CLEAR:
@@ -4476,7 +4458,7 @@ static void binder_release_work(struct binder_proc *proc,
 			binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
 				"undelivered death notification, %016llx\n",
 				(u64)death->cookie);
-			kmem_cache_free(binder_ref_death_pool, death);
+			kfree(death);
 			binder_stats_deleted(BINDER_STAT_DEATH);
 		} break;
 		default:
@@ -4537,14 +4519,14 @@ static struct binder_thread *binder_get_thread(struct binder_proc *proc)
 	thread = binder_get_thread_ilocked(proc, NULL);
 	binder_inner_proc_unlock(proc);
 	if (!thread) {
-		new_thread = kmem_cache_zalloc(binder_thread_pool, GFP_KERNEL);
+		new_thread = kzalloc(sizeof(*thread), GFP_KERNEL);
 		if (new_thread == NULL)
 			return NULL;
 		binder_inner_proc_lock(proc);
 		thread = binder_get_thread_ilocked(proc, new_thread);
 		binder_inner_proc_unlock(proc);
 		if (thread != new_thread)
-			kmem_cache_free(binder_thread_pool, new_thread);
+			kfree(new_thread);
 	}
 	return thread;
 }
@@ -4556,7 +4538,7 @@ static void binder_free_proc(struct binder_proc *proc)
 	binder_alloc_deferred_release(&proc->alloc);
 	put_task_struct(proc->tsk);
 	binder_stats_deleted(BINDER_STAT_PROC);
-	kmem_cache_free(binder_proc_pool, proc);
+	kfree(proc);
 }
 
 static void binder_free_thread(struct binder_thread *thread)
@@ -4565,7 +4547,7 @@ static void binder_free_thread(struct binder_thread *thread)
 	binder_stats_deleted(BINDER_STAT_THREAD);
 	binder_proc_dec_tmpref(thread->proc);
 	put_task_struct(thread->task);
-	kmem_cache_free(binder_thread_pool, thread);
+	kfree(thread);
 }
 
 static int binder_thread_release(struct binder_proc *proc,
@@ -5031,6 +5013,9 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 	if (proc->tsk != current->group_leader)
 		return -EINVAL;
 
+	if ((vma->vm_end - vma->vm_start) > SZ_4M)
+		vma->vm_end = vma->vm_start + SZ_4M;
+
 	binder_debug(BINDER_DEBUG_OPEN_CLOSE,
 		     "%s: %d %lx-%lx (%ld K) vma %lx pagep %lx\n",
 		     __func__, proc->pid, vma->vm_start, vma->vm_end,
@@ -5070,7 +5055,7 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "%s: %d:%d\n", __func__,
 		     current->group_leader->pid, current->pid);
 
-	proc = kmem_cache_zalloc(binder_proc_pool, GFP_KERNEL);
+	proc = kzalloc(sizeof(*proc), GFP_KERNEL);
 	if (proc == NULL)
 		return -ENOMEM;
 	spin_lock_init(&proc->inner_lock);
@@ -5322,7 +5307,7 @@ static void binder_deferred_func(struct work_struct *work)
 	int defer;
 
 	do {
-		spin_lock(&binder_deferred_lock);
+		mutex_lock(&binder_deferred_lock);
 		if (!hlist_empty(&binder_deferred_list)) {
 			proc = hlist_entry(binder_deferred_list.first,
 					struct binder_proc, deferred_work_node);
@@ -5333,7 +5318,7 @@ static void binder_deferred_func(struct work_struct *work)
 			proc = NULL;
 			defer = 0;
 		}
-		spin_unlock(&binder_deferred_lock);
+		mutex_unlock(&binder_deferred_lock);
 
 		files = NULL;
 		if (defer & BINDER_DEFERRED_PUT_FILES) {
@@ -5359,14 +5344,14 @@ static DECLARE_WORK(binder_deferred_work, binder_deferred_func);
 static void
 binder_defer_work(struct binder_proc *proc, enum binder_deferred_state defer)
 {
-	spin_lock(&binder_deferred_lock);
+	mutex_lock(&binder_deferred_lock);
 	proc->deferred_work |= defer;
 	if (hlist_unhashed(&proc->deferred_work_node)) {
 		hlist_add_head(&proc->deferred_work_node,
 				&binder_deferred_list);
 		queue_work(binder_deferred_workqueue, &binder_deferred_work);
 	}
-	spin_unlock(&binder_deferred_lock);
+	mutex_unlock(&binder_deferred_lock);
 }
 
 static void print_binder_transaction_ilocked(struct seq_file *m,
@@ -5940,83 +5925,12 @@ static int __init init_binder_device(const char *name)
 	return ret;
 }
 
-static int __init binder_create_pools(void)
-{
-	int ret;
-
-	ret = binder_buffer_pool_create();
-	if (ret)
-		return ret;
-
-	binder_node_pool = KMEM_CACHE(binder_node, SLAB_HWCACHE_ALIGN);
-	if (!binder_node_pool)
-		goto err_node_pool;
-
-	binder_proc_pool = KMEM_CACHE(binder_proc, SLAB_HWCACHE_ALIGN);
-	if (!binder_proc_pool)
-		goto err_proc_pool;
-
-	binder_ref_death_pool = KMEM_CACHE(binder_ref_death, SLAB_HWCACHE_ALIGN);
-	if (!binder_ref_death_pool)
-		goto err_ref_death_pool;
-
-	binder_ref_pool = KMEM_CACHE(binder_ref, SLAB_HWCACHE_ALIGN);
-	if (!binder_ref_pool)
-		goto err_ref_pool;
-
-	binder_thread_pool = KMEM_CACHE(binder_thread, SLAB_HWCACHE_ALIGN);
-	if (!binder_thread_pool)
-		goto err_thread_pool;
-
-	binder_transaction_pool = KMEM_CACHE(binder_transaction, SLAB_HWCACHE_ALIGN);
-	if (!binder_transaction_pool)
-		goto err_transaction_pool;
-
-	binder_work_pool = KMEM_CACHE(binder_work, SLAB_HWCACHE_ALIGN);
-	if (!binder_work_pool)
-		goto err_work_pool;
-
-	return 0;
-
-err_work_pool:
-	kmem_cache_destroy(binder_transaction_pool);
-err_transaction_pool:
-	kmem_cache_destroy(binder_thread_pool);
-err_thread_pool:
-	kmem_cache_destroy(binder_ref_pool);
-err_ref_pool:
-	kmem_cache_destroy(binder_ref_death_pool);
-err_ref_death_pool:
-	kmem_cache_destroy(binder_proc_pool);
-err_proc_pool:
-	kmem_cache_destroy(binder_node_pool);
-err_node_pool:
-	binder_buffer_pool_destroy();
-	return -ENOMEM;
-}
-
-static void __init binder_destroy_pools(void)
-{
-	binder_buffer_pool_destroy();
-	kmem_cache_destroy(binder_node_pool);
-	kmem_cache_destroy(binder_proc_pool);
-	kmem_cache_destroy(binder_ref_death_pool);
-	kmem_cache_destroy(binder_ref_pool);
-	kmem_cache_destroy(binder_thread_pool);
-	kmem_cache_destroy(binder_transaction_pool);
-	kmem_cache_destroy(binder_work_pool);
-}
-
 static int __init binder_init(void)
 {
 	int ret;
 	char *device_name, *device_names, *device_tmp;
 	struct binder_device *device;
 	struct hlist_node *tmp;
-
-	ret = binder_create_pools();
-	if (ret)
-		return ret;
 
 	ret = binder_alloc_shrinker_init();
 	if (ret)
@@ -6026,7 +5940,7 @@ static int __init binder_init(void)
 	atomic_set(&binder_transaction_log_failed.cur, ~0U);
 	binder_deferred_workqueue = create_singlethread_workqueue("binder");
 	if (!binder_deferred_workqueue)
-		goto err_workqueue_init_failed;
+		return -ENOMEM;
 
 	binder_debugfs_dir_entry_root = debugfs_create_dir("binder", NULL);
 	if (binder_debugfs_dir_entry_root)
@@ -6094,8 +6008,6 @@ err_alloc_device_names_failed:
 	debugfs_remove_recursive(binder_debugfs_dir_entry_root);
 
 	destroy_workqueue(binder_deferred_workqueue);
-err_workqueue_init_failed:
-	binder_destroy_pools();
 
 	return ret;
 }

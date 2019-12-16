@@ -28,9 +28,6 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/list_lru.h>
-#include <linux/ratelimit.h>
-#include <linux/sizes.h>
-
 #include "binder_alloc.h"
 #include "binder_trace.h"
 
@@ -53,22 +50,6 @@ module_param_named(debug_mask, binder_alloc_debug_mask,
 		if (binder_alloc_debug_mask & mask) \
 			pr_info(x); \
 	} while (0)
-
-static struct kmem_cache *binder_buffer_pool;
-
-int binder_buffer_pool_create(void)
-{
-	binder_buffer_pool = KMEM_CACHE(binder_buffer, SLAB_HWCACHE_ALIGN);
-	if (!binder_buffer_pool)
-		return -ENOMEM;
-
-	return 0;
-}
-
-void binder_buffer_pool_destroy(void)
-{
-	kmem_cache_destroy(binder_buffer_pool);
-}
 
 static struct binder_buffer *binder_buffer_next(struct binder_buffer *buffer)
 {
@@ -247,7 +228,7 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 	}
 
 	if (!vma && need_mm) {
-		pr_err_ratelimited("%d: binder_alloc_buf failed to map pages in userspace, no vma\n",
+		pr_err("%d: binder_alloc_buf failed to map pages in userspace, no vma\n",
 			alloc->pid);
 		goto err_no_vma;
 	}
@@ -350,35 +331,6 @@ err_no_vma:
 	return vma ? -ENOMEM : -ESRCH;
 }
 
-
-static inline void binder_alloc_set_vma(struct binder_alloc *alloc,
-		struct vm_area_struct *vma)
-{
-	if (vma)
-		alloc->vma_vm_mm = vma->vm_mm;
-	/*
-	 * If we see alloc->vma is not NULL, buffer data structures set up
-	 * completely. Look at smp_rmb side binder_alloc_get_vma.
-	 * We also want to guarantee new alloc->vma_vm_mm is always visible
-	 * if alloc->vma is set.
-	 */
-	smp_wmb();
-	alloc->vma = vma;
-}
-
-static inline struct vm_area_struct *binder_alloc_get_vma(
-		struct binder_alloc *alloc)
-{
-	struct vm_area_struct *vma = NULL;
-
-	if (alloc->vma) {
-		/* Look at description in binder_alloc_set_vma */
-		smp_rmb();
-		vma = alloc->vma;
-	}
-	return vma;
-}
-
 static struct binder_buffer *binder_alloc_new_buf_locked(
 				struct binder_alloc *alloc,
 				size_t data_size,
@@ -395,10 +347,9 @@ static struct binder_buffer *binder_alloc_new_buf_locked(
 	size_t size, data_offsets_size;
 	int ret;
 
-	if (!binder_alloc_get_vma(alloc)) {
-		binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
-				   "%d: binder_alloc_buf, no vma\n",
-				   alloc->pid);
+	if (alloc->vma == NULL) {
+		pr_err("%d: binder_alloc_buf, no vma\n",
+		       alloc->pid);
 		return ERR_PTR(-ESRCH);
 	}
 
@@ -501,7 +452,7 @@ static struct binder_buffer *binder_alloc_new_buf_locked(
 	if (buffer_size != size) {
 		struct binder_buffer *new_buffer;
 
-		new_buffer = kmem_cache_zalloc(binder_buffer_pool, GFP_KERNEL);
+		new_buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);
 		if (!new_buffer) {
 			pr_err("%s: %d failed to alloc new buffer struct\n",
 			       __func__, alloc->pid);
@@ -622,7 +573,7 @@ static void binder_delete_free_buffer(struct binder_alloc *alloc,
 					 buffer_start_page(buffer) + PAGE_SIZE);
 	}
 	list_del(&buffer->entry);
-	kmem_cache_free(binder_buffer_pool, buffer);
+	kfree(buffer);
 }
 
 static void binder_free_buf_locked(struct binder_alloc *alloc,
@@ -745,18 +696,17 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 		}
 	}
 #endif
-	alloc->buffer_size = min_t(unsigned long, vma->vm_end - vma->vm_start,
-				   SZ_4M);
-	alloc->pages = kcalloc(alloc->buffer_size / PAGE_SIZE,
-			       sizeof(alloc->pages[0]),
+	alloc->pages = kzalloc(sizeof(alloc->pages[0]) *
+				   ((vma->vm_end - vma->vm_start) / PAGE_SIZE),
 			       GFP_KERNEL);
 	if (alloc->pages == NULL) {
 		ret = -ENOMEM;
 		failure_string = "alloc page array";
 		goto err_alloc_pages_failed;
 	}
+	alloc->buffer_size = vma->vm_end - vma->vm_start;
 
-	buffer = kmem_cache_zalloc(binder_buffer_pool, GFP_KERNEL);
+	buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);
 	if (!buffer) {
 		ret = -ENOMEM;
 		failure_string = "alloc buffer struct";
@@ -768,7 +718,9 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 	buffer->free = 1;
 	binder_insert_free_buffer(alloc, buffer);
 	alloc->free_async_space = alloc->buffer_size / 2;
-        binder_alloc_set_vma(alloc, vma);
+	barrier();
+	alloc->vma = vma;
+	alloc->vma_vm_mm = vma->vm_mm;
 	/* Same as mmgrab() in later kernel versions */
 	atomic_inc(&alloc->vma_vm_mm->mm_count);
 
@@ -796,10 +748,10 @@ void binder_alloc_deferred_release(struct binder_alloc *alloc)
 	int buffers, page_count;
 	struct binder_buffer *buffer;
 
-	buffers = 0;
-	mutex_lock(&alloc->mutex);
 	BUG_ON(alloc->vma);
 
+	buffers = 0;
+	mutex_lock(&alloc->mutex);
 	while ((n = rb_first(&alloc->allocated_buffers))) {
 		buffer = rb_entry(n, struct binder_buffer, rb_node);
 
@@ -817,7 +769,7 @@ void binder_alloc_deferred_release(struct binder_alloc *alloc)
 
 		list_del(&buffer->entry);
 		WARN_ON_ONCE(!list_empty(&alloc->buffers));
-		kmem_cache_free(binder_buffer_pool, buffer);
+		kfree(buffer);
 	}
 
 	page_count = 0;
@@ -942,7 +894,7 @@ int binder_alloc_get_allocated_count(struct binder_alloc *alloc)
  */
 void binder_alloc_vma_close(struct binder_alloc *alloc)
 {
-	binder_alloc_set_vma(alloc, NULL);
+	WRITE_ONCE(alloc->vma, NULL);
 }
 
 /**
@@ -979,11 +931,12 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 	page_addr = (uintptr_t)alloc->buffer + index * PAGE_SIZE;
 
 	mm = alloc->vma_vm_mm;
-	if (!mmget_not_zero(mm))
+	/* Same as mmget_not_zero() in later kernel versions */
+	if (!atomic_inc_not_zero(&alloc->vma_vm_mm->mm_users))
 		goto err_mmget;
-	if (!down_read_trylock(&mm->mmap_sem))
-		goto err_down_read_mmap_sem_failed;
-	vma = binder_alloc_get_vma(alloc);
+	if (!down_write_trylock(&mm->mmap_sem))
+		goto err_down_write_mmap_sem_failed;
+	vma = alloc->vma;
 
 	list_lru_isolate(lru, item);
 	spin_unlock(lock);
@@ -998,7 +951,7 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 
 		trace_binder_unmap_user_end(alloc, index);
 	}
-	up_read(&mm->mmap_sem);
+	up_write(&mm->mmap_sem);
 	mmput(mm);
 
 	trace_binder_unmap_kernel_start(alloc, index);
@@ -1013,7 +966,7 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 	mutex_unlock(&alloc->mutex);
 	return LRU_REMOVED_RETRY;
 
-err_down_read_mmap_sem_failed:
+err_down_write_mmap_sem_failed:
 	mmput_async(mm);
 err_mmget:
 err_page_already_freed:
