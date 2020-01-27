@@ -44,32 +44,30 @@ struct rt_mutex_waiter {
 
 static inline int rt_mutex_has_waiters(struct rt_mutex *lock)
 {
-	return !RB_EMPTY_ROOT(&lock->waiters.rb_root);
+	return !RB_EMPTY_ROOT(&lock->waiters);
 }
 
 static inline struct rt_mutex_waiter *
 rt_mutex_top_waiter(struct rt_mutex *lock)
 {
-	struct rb_node *leftmost = rb_first_cached(&lock->waiters);
 	struct rt_mutex_waiter *w = NULL;
 
-	if (leftmost) {
-		w = rb_entry(leftmost, struct rt_mutex_waiter, tree_entry);
-		BUG_ON(w->lock != lock);
-	}
+	w = rb_entry(lock->waiters_leftmost, struct rt_mutex_waiter,
+		     tree_entry);
+	BUG_ON(w->lock != lock);
 	return w;
 }
 
 static inline int task_has_pi_waiters(struct task_struct *p)
 {
-	return !RB_EMPTY_ROOT(&p->pi_waiters.rb_root);
+	return !RB_EMPTY_ROOT(&p->pi_waiters);
 }
 
 static inline struct rt_mutex_waiter *
 task_top_pi_waiter(struct task_struct *p)
 {
-	return rb_entry(p->pi_waiters.rb_leftmost,
-			struct rt_mutex_waiter, pi_tree_entry);
+	return rb_entry(p->pi_waiters_leftmost, struct rt_mutex_waiter,
+			pi_tree_entry);
 }
 
 #else
