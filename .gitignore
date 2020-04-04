@@ -38,6 +38,7 @@ modules.builtin
 Module.symvers
 *.dwo
 *.su
+*.py
 
 #
 # Top-level generic files
