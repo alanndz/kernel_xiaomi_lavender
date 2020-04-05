@@ -3126,7 +3126,7 @@ static unsigned long perfcl_boot_rate = 1747200000;
 static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 {
 	int rc = 0, cpu, i;
-	int speedbin = 1, pvs_ver = 0;
+	int speedbin = 0, pvs_ver = 0;
 	bool is_sdm630 = 0;
 	int num_clks = ARRAY_SIZE(osm_qcom_clk_hws);
 	struct clk *clk;
