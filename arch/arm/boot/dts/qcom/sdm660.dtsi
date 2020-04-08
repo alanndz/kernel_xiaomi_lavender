@@ -164,7 +164,7 @@
 			device_type = "cpu";
 			compatible = "arm,kryo";
 			reg = <0x0 0x100>;
-                        clock-frequency = <2457600000>;
+                        clock-frequency = <2208000000>;
 			enable-method = "psci";
 			qcom,limits-info = <&mitigation_profile1>;
 			qcom,lmh-dcvs = <&lmh_dcvs1>;
@@ -195,7 +195,7 @@
 			device_type = "cpu";
 			compatible = "arm,kryo";
 			reg = <0x0 0x101>;
-                        clock-frequency = <2457600000>;
+                        clock-frequency = <2208000000>;
 			enable-method = "psci";
 			qcom,limits-info = <&mitigation_profile2>;
 			qcom,lmh-dcvs = <&lmh_dcvs1>;
@@ -222,7 +222,7 @@
 			device_type = "cpu";
 			compatible = "arm,kryo";
 			reg = <0x0 0x102>;
-                        clock-frequency = <2457600000>;
+                        clock-frequency = <2208000000>;
 			enable-method = "psci";
 			qcom,limits-info = <&mitigation_profile3>;
 			qcom,lmh-dcvs = <&lmh_dcvs1>;
@@ -249,7 +249,7 @@
 			device_type = "cpu";
 			compatible = "arm,kryo";
 			reg = <0x0 0x103>;
-                        clock-frequency = <2457600000>;
+                        clock-frequency = <2208000000>;
 			enable-method = "psci";
 			qcom,limits-info = <&mitigation_profile4>;
 			qcom,lmh-dcvs = <&lmh_dcvs1>;
@@ -336,7 +336,7 @@
 				1804800 883
 				1958400 1222
 				2150400 1592
-				2457600	2080
+				2208000 1632
 			>;
 			idle-cost-data = <
 				100 80 60 40
@@ -364,7 +364,7 @@
 				1804800 31
 				1958400 31
 				2150400 37
-				2457600	45
+				2208000 44
 			>;
 			idle-cost-data = <
 				4 3 2 1
