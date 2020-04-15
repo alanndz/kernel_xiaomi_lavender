@@ -166,6 +166,7 @@ static int process_victims(int vlen, unsigned long pages_needed)
 	return nr_to_kill;
 }
 
+#ifndef CONFIG_NLMK
 static void scan_and_kill(unsigned long pages_needed)
 {
 	int i, nr_to_kill = 0, nr_victims = 0, ret;
@@ -267,6 +268,7 @@ static int simple_lmk_reclaim_thread(void *data)
 
 	return 0;
 }
+#endif
 
 void simple_lmk_mm_freed(struct mm_struct *mm)
 {
@@ -306,9 +308,12 @@ static int simple_lmk_init_set(const char *val, const struct kernel_param *kp)
 	struct task_struct *thread;
 
 	if (!atomic_cmpxchg(&init_done, 0, 1)) {
+#ifndef CONFIG_NLMK
 		thread = kthread_run(simple_lmk_reclaim_thread, NULL,
 				     "simple_lmkd");
+
 		BUG_ON(IS_ERR(thread));
+#endif
 		BUG_ON(vmpressure_notifier_register(&vmpressure_notif));
 	}
 

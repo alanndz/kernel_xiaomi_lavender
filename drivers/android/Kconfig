@@ -55,6 +55,16 @@ config ANDROID_SIMPLE_LMK
 	  satisfied, as observed from kswapd struggling to free up pages. Simple
 	  LMK stops killing processes when kswapd finally goes back to sleep.
 
+config NLMK
+	bool "No Low Memory Killer"
+	depends on ANDROID_SIMPLE_LMK
+	---help---
+	  A Slightly modified from Simple Low Memory Killer, which are not 
+	  kill your current application when memory almost full. But beware, 
+	  you will need to close recent apps after use it.
+
+	  If not sure, say N
+
 if ANDROID_SIMPLE_LMK
 
 config ANDROID_SIMPLE_LMK_MINFREE
